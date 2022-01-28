@@ -1,4 +1,4 @@
-Georgia Mail
+Georgia Mail Ballot Analysis
 ================
 
   - [Overview](#overview)
@@ -8,7 +8,7 @@ Georgia Mail
 
 ## Overview
 
-This repository contains the code needed to reproduce Mother Jones' analysis of Georgia Secretary of State voting data that shows Georgians are being disenfranchised after the GOP-controlled legislature passed sweeping new restrictions on mail voting last year.
+This repository contains the code needed to reproduce Mother Jones' analysis of Georgia Secretary of State voting data that shows Georgians are being disenfranchised after the GOP-controlled legislature passed sweeping new restrictions on mail voting last year. Read our story: [We Uncovered How Many Georgians Were Disenfranchised by GOP Voting Restrictions. It’s Staggering.] (https://www.motherjones.com/politics/2022/01/gop-voting-law-disenfranshised-georgia-voters/)
 
 An analysis by the Atlanta Journal-Constitution in November 2021 found that rejected mail ballot applications had quadrupled compared to 2020. But examining rejected applications only tells part of the story. In Georgia, voters can—and many do—file multiple applications for a mail ballot. In some cases, one of those requests may be approved. So Mother Jones zeroed in how many voters never cast a ballot by mail or in person after their mail applications were denied. That yielded a more alarming number: 45 times more Georgians were denied the right to vote in 2021 than in the previous election. Even though mail voting was less crucial before the pandemic, Mother Jones also compared the 2021 election to municipal elections in 2019 and 2017. We found that mail voters last fall were more than 5 times more likely to be disenfranchised than during those previous elections.
 
