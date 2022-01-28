@@ -1,0 +1,1733 @@
+---
+title: "import-analysis"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(janitor)
+library(lubridate)
+options(digits=6)
+options(scipen=999)
+
+'%notin%' <- Negate('%in%')
+
+
+#does a standard group_by and count() with percentage
+grouper <- function(input_df, group_by_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = n()) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+}
+
+#group/counts every column in input dataframe
+group_count <- function(input_df, group_column_name='n()', state_filter=NA, start_col = 1){
+  column_names <- colnames(input_df)
+  if(!is.na(state_filter)){
+    input_df <- input_df %>%
+      filter(state == state_filter)
+  }
+  for (column in column_names[start_col:length(column_names)]){
+    output <- grouper(input_df, column, group_column_name)
+    print(output)
+  }
+}
+
+#function for calculating age, updates to the day; stolen from the internet
+calc_age <- function(birthDate, refDate = Sys.Date()) {
+    require(lubridate)
+    period <- as.period(interval(birthDate, refDate),
+                        unit = "year")
+    period$year
+}
+
+#lowers case of every character column in a dataframe
+lower_df <- function(input_df){
+  names <- colnames(input_df)
+  output_df <- input_df
+  names <- colnames(output_df)
+  for (name in names){
+    if (is.character(output_df[[name]])){
+      output_df[[name]] <- tolower(output_df[[name]])
+      #print('yes')
+    } else {
+      output_df[[name]] <- output_df[[name]]
+      #print('no')
+    }
+  }
+  return(output_df)
+}
+
+#imports every file in a folder
+import_files_in_folder <- function(input_path, output_name=''){
+  files <- list.files(path=input_path)
+  for (file in files){
+    print(file)
+    file_path = paste0(input_path, file)
+    file_sans_csv = str_remove(file, '.csv')
+    file_sans_csv = gsub("-", "_", file_sans_csv)
+    imported_file <- read_csv(file_path)
+    assign(paste0(file_sans_csv, output_name), imported_file, envir = parent.frame())
+  }
+}
+
+import_bind_files_in_folder <- function(input_path, output_name=''){
+  files <- list.files(path=input_path)
+  master <- read_csv(paste0(input_path, files[1]))
+  for (file in files[2:length(files)]){
+    if (str_sub(file, -3) == 'csv'){
+      binder <- read_csv(paste0(input_path, file))
+      master <- master %>%
+        rbind(binder)      
+    } else {
+      #pass
+    }
+  }
+  return(master)
+}
+
+grouper_sum <- function(input_df, group_by_column, sum_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = sum(.data[[sum_column]])) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+  
+}
+
+```
+
+
+#CLEANER
+
+```{r}
+
+#provides fixed-width definitions for voter history data imports
+voter_history_key <- fwf_cols("county_number"=3, "voter_registration_number"=8, "election_date"=8, "election_type"=3, "party"=2, "absentee"=1, "provisionial"=1, "supplemental"=1)
+voter_history_col_types <- c("c", "c", "c", "c", "c", "c", "c", "c")
+
+#cleans voter history data imports
+voter_history_cleaner <- function(input_df){
+  output_df <- input_df %>%
+    mutate(election_date = ymd(election_date),
+           election_type = tolower(case_when(
+             election_type == "001" ~ "GENERAL PRIMARY",
+             election_type == "002" ~ "GENERAL PRIMARY RUN-OFF",
+             election_type == "003" ~ "GENERAL",
+             election_type == "004" ~ "GENERAL ELECTION RUNOFF",
+             election_type == "005" ~ "SPECIAL ELECTION",
+             election_type == "006" ~ "SPECIAL RUNOFF",
+             election_type == "007" ~ "NON- PARTISAN",
+             election_type == "008" ~ "SPECIAL/NON-PARTISAN",
+             election_type == "009" ~ "RECALL",
+             election_type == "010" ~ "PPP",
+             TRUE ~ "other"))
+           )
+}
+
+#cleans absentee data imports
+clean_absentee_data <- function(input_df, election_date){
+  
+  output_df <- input_df %>%
+    clean_names() %>%
+    select(-party) %>%
+    #changed application status to binary, 1 is accepted, 0 is reject
+    mutate(binary_application_status = case_when(
+      application_status == "A" ~ 1,
+      application_status == "R" ~ 0
+    )) %>%
+    #mutating binary ballot accepted, returns 0 if ballot was not received, 1 is received, 0 is not received
+    mutate(binary_ballot_return = case_when(
+      is.na(ballot_return_date) ~ 0,
+      TRUE ~ 1
+    )) %>%
+    mutate(binary_ballot_status = case_when(
+      ballot_status == 'A' ~ 1,
+      TRUE ~ 0
+    )) %>%
+    #mutating to lubridates
+    mutate(application_date = mdy(application_date),
+           ballot_issued_date = mdy(ballot_issued_date),
+           ballot_return_date = mdy(ballot_return_date)) %>%
+    mutate(application_days_from = as.numeric(as.difftime(mdy(election_date) - application_date)),
+           ballot_issued_days_from = as.numeric(as.difftime(mdy(election_date) - ballot_issued_date)),
+           ballot_return_days_from = as.numeric(as.difftime(mdy(election_date) - ballot_return_date))
+           ) %>%
+    left_join(party_key, by = "voter_registration_number")
+}
+
+#reading this now to build a voter party key with for 2021 and 2019, which don't have this data
+voter_history_2020 <- read_fwf('./data/voter-history-2020.TXT', voter_history_key, voter_history_col_types) %>%
+  voter_history_cleaner()
+
+party_key <- voter_history_2020 %>%
+  filter(!is.na(party)) %>%
+  group_by(voter_registration_number, party) %>%
+  count() %>%
+  ungroup() %>%
+  group_by(voter_registration_number) %>%
+  summarise(parties = paste0(party, collapse = ", ")) %>%
+  mutate(voted_in_dem = case_when(
+    str_detect(parties, "D") == TRUE ~ TRUE,
+    TRUE ~ FALSE),
+    voted_in_rep = case_when(
+    str_detect(parties, "R") == TRUE ~ TRUE,
+    TRUE ~ FALSE)
+  ) %>%
+  select(-parties) %>%
+  mutate(voted_in_both = case_when(
+    voted_in_dem == TRUE & voted_in_rep == TRUE ~ TRUE,
+    TRUE ~ FALSE
+  )) %>%
+  mutate(party = case_when(
+    voted_in_both == FALSE & voted_in_dem ~ "D",
+    voted_in_both == FALSE & voted_in_rep ~ "R",
+    voted_in_both == TRUE ~ "Both",
+    TRUE ~ "None"
+  ))
+
+```
+
+# UNIQUE PEOPLE WHO HAD BALLOTS REJECTED IN 2021
+
+```{r}
+
+#importing 2021 data
+absentee_2021 <- read_csv("./data/2021/STATEWIDE.csv") %>%
+  clean_absentee_data("11-02-2021")
+
+
+mailed_2021 <- absentee_2021 %>%
+  #selecting only mailed ballots
+  filter(ballot_style != "IN PERSON") %>%
+  #binding any row that is na, which are requests that were denied
+  bind_rows(absentee_2021 %>%
+              filter(is.na(ballot_style)))
+
+mailed_voters_2021 <- mailed_2021 %>%
+  #grouping unique voter identifier
+  group_by(voter_registration_number) %>%
+  #counting the total number of applications
+  summarise(applications = n(),
+            #if any application resulted in a 1, will say 1
+            application_response = max(binary_application_status),
+            ballot_returned = max(binary_ballot_return),
+            ballot_status = max(binary_ballot_status)) %>%
+  ungroup()
+
+#grouper is a function that groups, counts and creates a percentage for (data, column, name_of_count()_column)
+application_responses_2021 <- grouper(mailed_voters_2021, "application_response", "requests")
+application_responses_2021
+
+#these numbers do not change when you repair false acceptance
+```
+
+#MAIL-IN VOTING OUTCOMES FROM CERTIFIED RESULTS
+
+```{r}
+
+#reading certified voter history file
+voter_history_2021 <- read_fwf('./data/voter-history-2021.TXT', voter_history_key, voter_history_col_types) %>%
+  voter_history_cleaner()
+
+nov_21_election <- voter_history_2021 %>%
+  #filtering for November general/special election
+  filter(election_date == mdy('11022021')) %>%
+  #grouping by unique voter id and county number
+  group_by(voter_registration_number, county_number) %>%
+  #two ballots per person if they also voted in a special election
+  summarise(ballots = n(),
+            elections = paste0(election_type, collapse = ", "))
+
+certified_mailed_voters_2021 <- mailed_voters_2021 %>%
+  #joining mailed_voters_2021 
+  left_join(nov_21_election) %>%
+  mutate(voted = case_when(
+      !is.na(ballots) ~ TRUE,
+      TRUE ~ FALSE),
+    ballot_returned = case_when(
+      ballot_returned == 1 ~ TRUE,
+      TRUE ~ FALSE),
+    application_response = case_when(
+      application_response == 1 ~ "A",
+      TRUE ~ "R"),
+    ballot_status = case_when(
+      ballot_status == 1 ~ "A",
+      TRUE ~ "R")
+    ) %>%
+  select(-county_number, -ballots, -elections) %>%
+  mutate(voter_outcome = case_when(
+    #classifies cases where application was approved
+    ballot_returned == TRUE & voted == FALSE & application_response == "A" ~ "ballot returned, vote missing",
+    ballot_returned == FALSE & voted == TRUE & application_response == "A" ~ "did not return, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "R" & application_response == "A" ~ "returned ballot, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "A" & application_response == "A" ~ "returned ballot, voted by mail",
+    ballot_returned == FALSE & voted == FALSE & application_response == "A" & application_response == "A" ~ "did not return, did not vote",
+    #classifies cases where application was not approved
+    application_response == "R" & voted == TRUE ~ 'was not approved, voted in person',
+    application_response == "R" & voted == FALSE ~ 'was not approved, did not vote',
+    TRUE ~ "other"
+  ))
+
+certified_absentee_results_2021 <- grouper(certified_mailed_voters_2021, 
+  "voter_outcome", "voters") %>%
+  #adds column  to filter by
+  mutate(voted = case_when(
+    str_detect(voter_outcome, "voted") ~ TRUE,
+    TRUE ~ FALSE
+    ))
+
+certified_absentee_results_2021
+```
+
+# UNIQUE PEOPLE WHO HAD BALLOTS REJECTED IN 2020
+
+```{r}
+
+
+absentee_2020 <- read_csv("./data/2020/STATEWIDE.csv") %>%
+  clean_absentee_data('11032020')
+
+mailed_2020 <- absentee_2020 %>%
+  #selecting only mailed ballots
+  filter(ballot_style != "IN PERSON") %>%
+  #binding any row that is na, which are requests that were denied
+  bind_rows(absentee_2020 %>%
+              filter(is.na(ballot_style)))
+
+mailed_voters_2020 <- mailed_2020 %>%
+  #grouping by an indiviudal by their unique identifier
+  group_by(voter_registration_number) %>%
+  #counting the total number of applciations
+  summarise(applications = n(),
+            #says if the ultimate response was a 1 for accepted
+            application_response = max(binary_application_status),
+            ballot_returned = max(binary_ballot_return),
+            ballot_status = max(binary_ballot_status)) %>%
+  ungroup()
+
+
+application_responses_2020 <- grouper(mailed_voters_2020, "application_response", "requests")
+application_responses_2020
+
+
+#these numbers do not change when you repair false acceptance
+```
+
+#MAIL-IN VOTING OUTCOMES FROM CERTIFIED RESULTS
+
+```{r}
+
+nov_20_election <- voter_history_2020 %>%
+  filter(election_date == mdy('11032020')) %>%
+         #two ballots per person if they also voted in a special election
+  group_by(voter_registration_number, county_number) %>%
+  summarise(ballots = n(),
+            elections = paste0(election_type, collapse = ", "))
+
+certified_mailed_voters_2020 <- mailed_voters_2020 %>%
+  left_join(nov_20_election) %>%
+  mutate(voted = case_when(
+      !is.na(ballots) ~ TRUE,
+      TRUE ~ FALSE),
+    ballot_returned = case_when(
+      ballot_returned == 1 ~ TRUE,
+      TRUE ~ FALSE),
+    application_response = case_when(
+      application_response == 1 ~ "A",
+      TRUE ~ "R"),
+    ballot_status = case_when(
+      ballot_status == 1 ~ "A",
+      TRUE ~ "R")
+    ) %>%
+  select(-county_number, -ballots, -elections) %>%
+  mutate(voter_outcome = case_when(
+    #classifies cases where application was approved
+    ballot_returned == TRUE & voted == FALSE & application_response == "A" ~ "ballot returned, vote missing",
+    ballot_returned == FALSE & voted == TRUE & application_response == "A" ~ "did not return, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "R" & application_response == "A" ~ "returned ballot, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "A" & application_response == "A" ~ "returned ballot, voted by mail",
+    ballot_returned == FALSE & voted == FALSE & application_response == "A" & application_response == "A" ~ "did not return, did not vote",
+    #classifies cases where application was not approved
+    application_response == "R" & voted == TRUE ~ 'was not approved, voted in person',
+    application_response == "R" & voted == FALSE ~ 'was not approved, did not vote',
+    TRUE ~ "other"
+  ))
+
+certified_absentee_results_2020 <- grouper(certified_mailed_voters_2020, "voter_outcome", "voters") %>%
+  mutate(voted = case_when(
+    str_detect(voter_outcome, "voted") ~ TRUE,
+    TRUE ~ FALSE
+    ))
+
+certified_absentee_results_2020
+```
+
+# UNIQUE PEOPLE WHO HAD BALLOTS REJECTED IN 2019
+
+```{r}
+
+absentee_2019 <- read_csv("./data/2019/STATEWIDE.csv") %>%
+  clean_absentee_data('11052019')
+
+mailed_2019 <- absentee_2019 %>%
+  #selecting only mailed ballots
+  filter(ballot_style != "IN PERSON") %>%
+  #binding any row that is na, which are requests that were denied
+  bind_rows(absentee_2019 %>%
+              filter(is.na(ballot_style)))
+
+mailed_voters_2019 <- mailed_2019 %>%
+  #grouping by an indiviudal by their unique identifier
+  group_by(voter_registration_number) %>%
+  #counting the total number of applciations
+  summarise(applications = n(),
+            #says if the ultimate response was a 1 for accepted
+            application_response = max(binary_application_status),
+            ballot_returned = max(binary_ballot_return),
+            ballot_status = max(binary_ballot_status)) %>%
+  ungroup()
+
+
+application_responses_2019 <- grouper(mailed_voters_2019, "application_response", "requests")
+application_responses_2019
+
+
+#these numbers do not change when you repair false acceptance
+```
+
+#MAIL-IN VOTING OUTCOMES FROM CERTIFIED RESULTS
+
+```{r}
+
+voter_history_2019 <- read_fwf('./data/voter-history-2019.TXT', voter_history_key, voter_history_col_types) %>%
+  voter_history_cleaner()
+
+nov_19_election <- voter_history_2019 %>%
+  filter(election_date == mdy('11052019')) %>%
+         #two ballots per person if they also voted in a special election
+  group_by(voter_registration_number, county_number) %>%
+  summarise(ballots = n(),
+            elections = paste0(election_type, collapse = ", "))
+
+certified_mailed_voters_2019 <- mailed_voters_2019 %>%
+  left_join(nov_19_election) %>%
+  mutate(voted = case_when(
+      !is.na(ballots) ~ TRUE,
+      TRUE ~ FALSE),
+    ballot_returned = case_when(
+      ballot_returned == 1 ~ TRUE,
+      TRUE ~ FALSE),
+    application_response = case_when(
+      application_response == 1 ~ "A",
+      TRUE ~ "R"),
+    ballot_status = case_when(
+      ballot_status == 1 ~ "A",
+      TRUE ~ "R")
+    ) %>%
+  select(-county_number, -ballots, -elections) %>%
+  mutate(voter_outcome = case_when(
+    #classifies cases where application was approved
+    ballot_returned == TRUE & voted == FALSE & application_response == "A" ~ "ballot returned, vote missing",
+    ballot_returned == FALSE & voted == TRUE & application_response == "A" ~ "did not return, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "R" & application_response == "A" ~ "returned ballot, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "A" & application_response == "A" ~ "returned ballot, voted by mail",
+    ballot_returned == FALSE & voted == FALSE & application_response == "A" & application_response == "A" ~ "did not return, did not vote",
+    #classifies cases where application was not approved
+    application_response == "R" & voted == TRUE ~ 'was not approved, voted in person',
+    application_response == "R" & voted == FALSE ~ 'was not approved, did not vote',
+    TRUE ~ "other"
+  ))
+
+certified_absentee_results_2019 <- grouper(certified_mailed_voters_2019, "voter_outcome", "voters") %>%
+  mutate(voted = case_when(
+    str_detect(voter_outcome, "voted") ~ TRUE,
+    TRUE ~ FALSE
+    ))
+
+certified_absentee_results_2019
+```
+# UNIQUE PEOPLE WHO HAD BALLOTS REJECTED IN 2017
+
+```{r}
+
+#importing 2017 data
+absentee_2017 <- read_csv("./data/2017/STATEWIDE.csv") %>%
+  clean_absentee_data('11072017')
+
+
+mailed_2017 <- absentee_2017 %>%
+  #selecting only mailed ballots
+  filter(ballot_style != "IN PERSON") %>%
+  #binding any row that is na, which are requests that were denied
+  bind_rows(absentee_2017 %>%
+              filter(is.na(ballot_style)))
+
+mailed_voters_2017 <- mailed_2017 %>%
+  #grouping unique voter identifier
+  group_by(voter_registration_number) %>%
+  #counting the total number of applications
+  summarise(applications = n(),
+            #if any application resulted in a 1, will say 1
+            application_response = max(binary_application_status),
+            ballot_returned = max(binary_ballot_return),
+            ballot_status = max(binary_ballot_status)) %>%
+  ungroup()
+
+#grouper is a function that groups, counts and creates a percentage for (data, column, name_of_count()_column)
+application_responses_2017 <- grouper(mailed_voters_2017, "application_response", "requests")
+application_responses_2017
+
+#these numbers do not change when you repair false acceptance
+```
+
+#MAIL-IN VOTING OUTCOMES FROM CERTIFIED RESULTS
+
+```{r}
+
+#reading certified voter history file
+voter_history_2017 <- read_fwf('./data/voter-history-2017.TXT', voter_history_key, voter_history_col_types) %>%
+  voter_history_cleaner()
+
+nov_17_election <- voter_history_2017 %>%
+  #filtering for November general/special election
+  filter(election_date == mdy('11072017')) %>%
+  #grouping by unique voter id and county number
+  group_by(voter_registration_number, county_number) %>%
+  #two ballots per person if they also voted in a special election
+  summarise(ballots = n(),
+            elections = paste0(election_type, collapse = ", "))
+
+certified_mailed_voters_2017 <- mailed_voters_2017 %>%
+  #joining mailed_voters_2017 
+  left_join(nov_21_election) %>%
+  mutate(voted = case_when(
+      !is.na(ballots) ~ TRUE,
+      TRUE ~ FALSE),
+    ballot_returned = case_when(
+      ballot_returned == 1 ~ TRUE,
+      TRUE ~ FALSE),
+    application_response = case_when(
+      application_response == 1 ~ "A",
+      TRUE ~ "R"),
+    ballot_status = case_when(
+      ballot_status == 1 ~ "A",
+      TRUE ~ "R")
+    ) %>%
+  select(-county_number, -ballots, -elections) %>%
+  mutate(voter_outcome = case_when(
+    #classifies cases where application was approved
+    ballot_returned == TRUE & voted == FALSE & application_response == "A" ~ "ballot returned, vote missing",
+    ballot_returned == FALSE & voted == TRUE & application_response == "A" ~ "did not return, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "R" & application_response == "A" ~ "returned ballot, voted in person",
+    ballot_returned == TRUE & voted == TRUE & ballot_status == "A" & application_response == "A" ~ "returned ballot, voted by mail",
+    ballot_returned == FALSE & voted == FALSE & application_response == "A" & application_response == "A" ~ "did not return, did not vote",
+    #classifies cases where application was not approved
+    application_response == "R" & voted == TRUE ~ 'was not approved, voted in person',
+    application_response == "R" & voted == FALSE ~ 'was not approved, did not vote',
+    TRUE ~ "other"
+  ))
+
+certified_absentee_results_2017 <- grouper(certified_mailed_voters_2017, "voter_outcome", "voters") %>%
+  #adds column  to filter by
+  mutate(voted = case_when(
+    str_detect(voter_outcome, "voted") ~ TRUE,
+    TRUE ~ FALSE
+    ))
+
+certified_absentee_results_2017
+```
+
+#JOINED MAIL-IN VOTER OUTCOMES
+
+```{R}
+
+#modifying for join
+agg_vote_2021 <- certified_absentee_results_2021 %>%
+  rename(voters_2021 = voters,
+         percent_2021 = percent)
+
+agg_vote_2020 <- certified_absentee_results_2020 %>%
+  rename(voters_2020 = voters,
+         percent_2020 = percent)
+
+agg_vote_2019 <- certified_absentee_results_2019 %>%
+  rename(voters_2019 = voters,
+         percent_2019 = percent)
+
+agg_vote_2017 <- certified_absentee_results_2017 %>%
+  rename(voters_2017 = voters,
+         percent_2017 = percent)
+
+#joining
+joined_agg_vote <- agg_vote_2021 %>%
+  left_join(agg_vote_2020) %>%
+  left_join(agg_vote_2019) %>%
+  left_join(agg_vote_2017) %>%
+  #calculating difference by dividing
+  mutate(difference_2020 = (percent_2021/percent_2020),
+         difference_2019 = (percent_2021/percent_2019),
+         difference_2017 = (percent_2021/percent_2017)) %>%
+  select(voter_outcome, voters_2021, voters_2020, voters_2019, voters_2017, percent_2021, percent_2020, percent_2019, percent_2017, difference_2020, difference_2019, difference_2017, voted)
+
+#creating totals rows
+agg_vote_total_row <- joined_agg_vote %>%
+  filter(voted == FALSE) %>%
+  adorn_totals("row") %>%
+  filter(voter_outcome == "Total") %>%
+  mutate(voter_outcome = "total mail-in voters who did not vote",
+         voted = as.logical(FALSE),
+         difference_2020 = percent_2021/percent_2020,
+         difference_2019 = percent_2021/percent_2019) 
+
+#binding totals row
+final_agg_vote <- joined_agg_vote %>%
+  arrange(desc(voted)) %>%
+  bind_rows(agg_vote_total_row)
+
+final_did_not_vote <- final_agg_vote %>%
+  filter(voted == FALSE)
+
+final_voted <- final_agg_vote %>%
+  filter(voted == TRUE)
+
+final_did_not_vote
+#write_csv(final_did_not_vote, "final-did-not-vote-aggregate.csv")
+```
+
+#HOW MANY VOTES WOULD HAVE BEEN LOST IN 2020 IF THEY REJECTED THE SAME PERCENT?
+
+```{r}
+
+860 * 44.843448
+
+```
+
+```{r}
+
+125793 * 2.512169
+
+```
+
+```{r}
+
+2.048850*15130
+
+```
+
+#HOW MANY MAIL-IN VOTES ACCOUNTED FOR ALL VOTES IN 2020 AND 2021?
+
+```{r}
+#2020
+paste0("2020 mail-in vote share: ", (sum(final_voted$voters_2020)/nrow(nov_20_election)*100))
+
+```
+
+```{r}
+
+#2021
+paste0("2021 mail-in vote share: ", (sum(final_voted$voters_2021)/nrow(nov_21_election)*100))
+
+```
+
+```{r}
+
+#2019
+paste0("2019 mail-in vote share: ", (sum(final_voted$voters_2019)/nrow(nov_19_election)*100))
+
+```
+
+```{r}
+
+#2017
+paste0("2017 mail-in vote share: ", (sum(final_voted$voters_2017)/nrow(nov_17_election)*100))
+
+```
+
+#HOW MANY BALLOTS REQUESTS WERE THERE COMPARED TO VOTES CAST?
+
+```{r}
+#2020
+paste0("2020 mail-in vote share: ", ((sum(final_voted$voters_2020)+sum(final_did_not_vote$voters_2020))/nrow(voter_history_2020)*100))
+
+```
+
+```{r}
+
+#2021
+paste0("2021 mail-in vote share: ", ((sum(final_voted$voters_2021)+sum(final_did_not_vote$voters_2021))/nrow(voter_history_2021)*100))
+
+```
+
+```{r}
+
+#2019
+paste0("2019 mail-in vote share: ", ((sum(final_voted$voters_2019)+sum(final_did_not_vote$voters_2019))/nrow(voter_history_2019)*100))
+
+```
+
+```{r}
+
+#2017
+paste0("2019 mail-in vote share: ", ((sum(final_voted$voters_2017)+sum(final_did_not_vote$voters_2017))/nrow(voter_history_2017)*100))
+
+```
+
+#WHAT COUNTIES ARE MISSING THE ABSENTEE DATA?
+
+
+```{r}
+#grouping all counties
+counties_2020 <- grouper(absentee_2020, "county")
+#grouping all counties
+counties_2021 <- grouper(absentee_2021, "county")
+
+#32 counties are not in the 2021 data
+missing_2021_counties <- counties_2020 %>%
+  select(county) %>%
+  anti_join(counties_2021, by = "county")
+
+#how much of the 2020 vote came from those counties?
+as.data.frame(counties_2020 %>%
+  filter(county %in% missing_2021_counties$county) %>%
+  adorn_totals("row"))
+
+#the 32 counties account for about 4.38% of the 2020 vote
+#gwinnett also seems to be a severe undercount
+
+gwinnett <- absentee_2021 %>%
+  filter(county == "GWINNETT")
+```
+
+#ALL BALLOTS REJECTED 2021
+
+```{r}
+
+#This matches the AJC analysis.
+# Their analysis was a simple group_by and count of the application_status column.
+acj_2021_replication <- grouper(mailed_2021, "application_status", "ajc_2021_replication") %>%
+  rename(ajc_2021_percent = percent)
+
+acj_2021_replication
+
+```
+#ALL BALLOTS REJECTED 2020
+
+```{r}
+
+#This may not match the AJC analysis. They reported "less than 1%". This is less than 1% but and rounds to 1% but I think calling this 1% is misleading. 
+#CNN appears to not have replicated this analysis, instead attributing "less than 1%" to AJC.
+acj_2020_replication <- grouper(mailed_2020, "application_status", "ajc_2020_replication") %>%
+  rename(ajc_2020_percent = percent)
+
+acj_2020_replication
+
+```
+
+#AM I INCLUDING ALL TYPES?
+
+```{r}
+#Yes
+grouper(mailed_2021, "ballot_style")
+
+```
+
+```{r}
+
+#Yes
+
+grouper(absentee_2021, "ballot_style")
+
+```
+
+
+#REPLICATE AJC
+
+```{r}
+
+not_in_person_2021 <- absentee_2021 %>%
+  filter(ballot_style != "IN PERSON") %>%
+  bind_rows(absentee_2021 %>%
+              filter(is.na(ballot_style)))
+
+grouper(not_in_person_2021, "application_status")
+
+```
+
+#ARE THERE DUPLICATE ROWS? SHOULD I COUNT THEM? IS AJC ANALYSIS WRONG?
+
+```{r}
+#There are duplicate rows. I should probably count them.
+#It appears Charles Henry Brooks made three requests on the same day. Two were rejected and are duplicates. The third was granted.
+#There is no column that could distinguish between two requests made on the same day rejected for the same reason.
+#This result raises another question, however. All three list an application status of "A." Technically this means that the AJC analysis is wrong by at least 2 and that we must question the accuracy of all entries in "application_status".
+
+temp <- absentee_2021 %>%
+  get_dupes() %>%
+  group_by(voter_registration_number) %>%
+  count()
+
+absentee_2021 %>%
+  filter(voter_registration_number %in% temp$voter_registration_number)
+
+```
+
+```{r}
+
+#absentee_2020's duplicate status reason is "Multiple Requests."  
+#Given that there are only 2 duplicates in about 4.7 million rows and this status reason, I will include duplicates in my analysis. 
+
+#finds dupes and groups by and counts them
+temp <- absentee_2020 %>%
+  get_dupes() %>%
+  group_by(voter_registration_number) %>%
+  count()
+
+#creates a dataframe of all entries for given voter_registration_number
+absentee_2020 %>%
+  filter(voter_registration_number %in% temp$voter_registration_number)
+
+```
+
+
+#SHOULD I INCLUDE NA AND ELECTRONIC?
+
+```{r}
+
+# YES, because these are requests that were rejected.
+
+
+
+na_ballot_styles <- absentee_2021 %>%
+  filter(is.na(ballot_style))
+
+grouper(na_ballot_styles, "status_reason")
+
+```
+
+#DOES THE DATA OVERLAP?
+
+```{r}
+
+#NO 
+
+grouped_absentee_2021 <- absentee_2021 %>%
+  group_by(application_date) %>%
+  summarise(count = n())
+
+ggplot(grouped_absentee_2021, aes(x=application_date, y=as.numeric(count))) +
+  geom_line() +
+  #ylab("Dollars spent per day") +
+  #xlab("Year and month") +
+  #ggtitle("Dollars contributed to WinRed per day") + 
+  #facet_wrap(~Year,scales=("free_x")) +
+  #scale_x_date(date_labels = "%b-%Y") +
+  #
+  scale_x_date(date_breaks = "3 month", date_labels="%b") +
+    facet_grid(~ year(application_date), space="free_x", scales="free_x", switch="x") +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          strip.placement = "outside",
+          strip.background = element_rect(fill=NA,colour="grey50"),
+          panel.spacing=unit(0,"cm")
+          )
+
+```
+
+```{r}
+
+grouped_absentee_2020 <- absentee_2020 %>%
+  group_by(application_date) %>%
+  summarise(count = n())
+
+ggplot(grouped_absentee_2020, aes(x=application_date, y=count)) +
+  geom_line() +
+  #ylab("Dollars spent per day") +
+  #xlab("Year and month") +
+  #ggtitle("Dollars contributed to WinRed per day") + 
+  #facet_wrap(~Year,scales=("free_x")) +
+  #scale_x_date(date_labels = "%b-%Y") +
+  #
+  scale_x_date(date_breaks = "3 month", date_labels="%b") +
+    facet_grid(~ year(application_date), space="free_x", scales="free_x", switch="x") +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          strip.placement = "outside",
+          strip.background = element_rect(fill=NA,colour="grey50"),
+          panel.spacing=unit(0,"cm")
+          )
+```
+
+# HOW MANY "A"S SAY REJECTED IN 2021 STATUS?
+
+```{r}
+
+false_acceptance_2021 <- mailed_2021 %>%
+  mutate(rejection_test = case_when(
+    is.na(ballot_issued_date) & application_status == "A" ~ "R",
+    TRUE ~ "A"
+  )) %>%
+  filter(rejection_test == "R")
+  #select(application_status, status_reason, ballot_issued_date)
+  
+
+grouper(false_acceptance_2021, "status_reason")
+
+```
+
+# REPAIRING FALSE ACCEPTANCES
+
+```{r}
+
+#this function will repair 2021 data by relabeling application status based on status reasons discovered in false_acceptance_2021
+#this analysis is meaningless, but done for exploratory reasons during cleaning and discovery
+#controlling for unique voter outcomes using the certified voter roll automatically cleans the problem this code was created to repair
+repair_false_acceptance_2021 <- function(input_df){
+  
+  output_df <- input_df %>%
+    mutate(application_status = case_when(
+    #relabeling all instances that say rejected
+    is.na(ballot_issued_date) & 
+      application_status == "A" &
+      str_detect(status_reason, "Rejected") == TRUE
+      ~ "R",
+    #relabeling all instances that include pre
+    is.na(ballot_issued_date) & 
+      application_status == "A" &
+      str_detect(status_reason, "PRE") == TRUE
+      ~ "R",
+    #all else stay the same
+    TRUE ~ application_status
+  ))
+  
+}
+  
+false_acceptance_test_2021 <- mailed_2021 %>%
+  repair_false_acceptance_2021()
+ 
+
+repaired_mailed_2021 <- grouper(false_acceptance_test_2021, "application_status", "repaired_application_status") %>%
+  rename(repaired_percent = percent)
+
+final_mailed_2021 <- repaired_mailed_2021 %>%
+  left_join(acj_2021_replication)
+
+final_mailed_2021
+```
+
+# HOW MANY "A"S SAY REJECTED IN 2020 STATUS?
+
+```{r}
+
+false_acceptance_2020 <- mailed_2020 %>%
+  mutate(rejection_test = case_when(
+    is.na(ballot_issued_date) & application_status == "A" ~ "R",
+    TRUE ~ "A"
+  )) %>%
+  filter(rejection_test == "R",
+         application_status != "R")
+  #select(application_status, status_reason, ballot_issued_date)
+  
+
+grouper(false_acceptance_2020, "status_reason")
+
+```
+
+```{r}
+
+#this function will repair 2020 data by relabeling application status based on status reasons discovered in false_acceptance_2020
+#this analysis is meaningless, but done for exploratory reasons during cleaning and discovery
+#controlling for unique voter outcomes using the certified voter roll automatically cleans the problem this code was created to repair
+
+repair_false_acceptance_2020 <- function(input_df){
+  
+  output_df <- input_df %>%
+    mutate(application_status = case_when(
+    #relabeling all instances that say rejected
+    is.na(ballot_issued_date) & 
+      application_status == "A" &
+      str_detect(status_reason, "Rejected") == TRUE
+      ~ "R",
+    #relabeling all instances that include "Rejected Ballot that has been re-issued"
+    is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "Rejected Ballot that has been re-issued") == TRUE
+    ~ "R",
+      is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "MULTIPLE REQUEST") == TRUE
+    ~ "R",
+          is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "MULTI APP ACCEPTED") == TRUE
+    ~ "R",
+    is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "DUPLICATE") == TRUE
+    ~ "R",
+    is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "PREV") == TRUE
+    ~ "R",
+    is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "REISSUE") == TRUE
+    ~ "R",
+    is.na(ballot_issued_date) & 
+    application_status == "A" &
+    str_detect(status_reason, "ERROR") == TRUE
+    ~ "R",
+    #all else stay the same
+    TRUE ~ application_status
+  ))
+ 
+
+}
+  
+false_acceptance_test_2020 <- mailed_2020 %>%
+  repair_false_acceptance_2020()
+ 
+
+repaired_mailed_2020 <- grouper(false_acceptance_test_2020, "application_status", "repaired_application_status") %>%
+  rename(repaired_percent = percent)
+
+final_mailed_2020 <- repaired_mailed_2020 %>%
+  left_join(acj_2020_replication)
+
+final_mailed_2020
+```
+
+#PARTISAN PERCENTAGE ANALYSIS
+
+```{r}
+
+#Building a dataframe of outcomes by party
+  
+build_partisan_data <- function(input_df, percentage = FALSE, combine_voted = FALSE){
+  
+  output_df <- input_df %>%
+    left_join(party_key) %>%
+    #creating a count to pivot
+    mutate(voter_count = 1) %>%
+    #adding voter_count for each voter_outcome
+    pivot_wider(names_from = voter_outcome, values_from = voter_count) %>%
+    clean_names() %>%
+    #grouping by party type and sum each outcome
+    group_by(party) %>%
+    summarise(returned_ballot_voted_by_mail = sum(returned_ballot_voted_by_mail, na.rm=TRUE),
+              ballot_returned_vote_missing = sum(ballot_returned_vote_missing, na.rm=TRUE),
+              was_not_approved_did_not_vote = sum(was_not_approved_did_not_vote, na.rm=TRUE),
+              did_not_return_voted_in_person = sum(did_not_return_voted_in_person, na.rm=TRUE),
+              did_not_return_did_not_vote = sum(did_not_return_did_not_vote, na.rm=TRUE),
+              was_not_approved_voted_in_person = sum(was_not_approved_voted_in_person, na.rm=TRUE),
+              returned_ballot_voted_in_person = sum(returned_ballot_voted_in_person, na.rm=TRUE)
+    ) %>%
+    #adding title columns and rows
+    adorn_totals("col") %>%
+    adorn_totals("row") %>%
+    clean_names()
+  
+  if(percentage == TRUE){
+    
+    output_df <- output_df %>%
+      mutate(returned_ballot_voted_by_mail = (returned_ballot_voted_by_mail/total)*100,
+            ballot_returned_vote_missing = (ballot_returned_vote_missing/total)*100,
+            was_not_approved_did_not_vote = (was_not_approved_did_not_vote/total)*100,
+            did_not_return_voted_in_person = (did_not_return_voted_in_person/total)*100,
+            did_not_return_did_not_vote = (did_not_return_did_not_vote/total)*100,
+            was_not_approved_voted_in_person = (was_not_approved_voted_in_person/total)*100,
+            returned_ballot_voted_in_person = (returned_ballot_voted_in_person/total)*100)
+  } else {
+    #pass
+  }
+  
+  if(combine_voted == TRUE){
+    
+    output_df <- output_df %>%
+      mutate(voted = returned_ballot_voted_by_mail + did_not_return_voted_in_person + was_not_approved_voted_in_person + returned_ballot_voted_in_person,
+            ballot_returned_vote_missing = ballot_returned_vote_missing,
+            was_not_approved_did_not_vote = was_not_approved_did_not_vote,
+            did_not_return_did_not_vote = did_not_return_did_not_vote
+            ) %>%
+      select(-returned_ballot_voted_by_mail, -did_not_return_voted_in_person, -was_not_approved_voted_in_person, -returned_ballot_voted_in_person, -total)
+    
+  } else {
+    #pass
+  }
+  return(output_df)
+}
+
+partisan_certified_mailed_voters_2021 <- certified_mailed_voters_2021 %>%
+  build_partisan_data()
+
+partisan_certified_mailed_voters_2020 <- certified_mailed_voters_2020 %>%
+  build_partisan_data()
+
+partisan_certified_mailed_voters_2019 <- certified_mailed_voters_2019 %>%
+  build_partisan_data()
+
+combined_partisan_voted <- certified_mailed_voters_2021 %>%
+  build_partisan_data(combine_voted = TRUE)
+
+#write_csv(combined_partisan_voted, "mail-ballot-outcomes-by-political-party.csv")
+
+#calculating percentages of total by party
+partisan_percentage_2021 <- certified_mailed_voters_2021 %>%
+  build_partisan_data(percentage = TRUE)
+
+partisan_percentage_2020 <- certified_mailed_voters_2020 %>%
+  build_partisan_data(percentage = TRUE)
+
+partisan_percentage_2019 <- certified_mailed_voters_2019 %>%
+  build_partisan_data(percentage = TRUE)
+
+
+
+#ANALYSIS: Given that 2/3rds of all voters are Democrats, comparing the outcomes for each political party is not important. While there are some differences in outcomes, the fact that so many ballots are from democrats mean the impacts of mail-in voting will disproportionately fall on them.
+
+#It may be okay to make a stacked bar chart out of this instead of making another graph.
+```
+
+#WHY IS 2021 MAIL-IN VOTERS GROUP AS A PERCENTAGE OF ALL SO LOW IN 2021? CAN IT BE EXPLAINED BY DATA DEFICIENCIES
+
+```{r}
+
+#it's not, I had made an error
+
+x2017 <- grouper(absentee_2019, "county", "ballot_requests_2017") %>%
+  rename(percent_2017 = percent)
+
+x2019 <- grouper(absentee_2019, "county", "ballot_requests_2019") %>%
+  rename(percent_2019 = percent)
+
+x2020 <- grouper(absentee_2020, "county", "ballot_requests_2020") %>%
+  rename(percent_2020 = percent)
+
+x2021 <- grouper(absentee_2021, "county", "ballot_requests_2021") %>%
+  rename(percent_2021 = percent)
+
+x2019%>%
+  #left_join(x2020) %>%
+  left_join(x2021) %>%
+  mutate(predicted_2021 = 245473*(percent_2019/100))
+
+#in 2019, Fulton, Chatham and Dekalb were 9.9, 8.8 and 7.4% of all ballots from 124 counties. Chatham was 2.7% in 2021. Dekalb was 12.2%.
+
+```
+
+#WHICH 3 COUNTIES REPORTED IN 2021 BUT NOT 2017 AND 2019?
+
+```{r}
+
+temp <- x2017 %>%
+  bind_rows(x2019) %>%
+  group_by(county) %>%
+  count()
+
+x2021 %>%
+  filter(county %notin% temp$county)
+```
+
+
+
+
+```{r}
+
+# sean thinks I might want to compare to the other municipal election, story would get strong if the story was the last couple of years
+# could get rid of the nature of election as a possible variable
+# maybe people just dont care about municipal elections
+
+#do I have the data that oculd test it? it's not just a theorey, it becomes true
+# what I may find is that typically the reject rate, the people not showing up to vote in the municipal elections are closer together, farther apart
+# sean would be interested to know what it says, story rides on the question about the 10 percentage point increases
+
+```
+
+# AVERAGE REQUEST DATE FOR VOTERS RECEIVED AFTER DEADLINE
+
+```{r}
+
+#average date from electrion that people who rejected for late requests requested, so I can say if it was 11th day, or was 1 day away, would they be rejected  
+
+was_not_approved_2021 <- certified_mailed_voters_2021 %>%
+  filter(str_detect(voter_outcome, "was not approved"))
+
+was_not_approved_2021 <- absentee_2021 %>%
+  filter(voter_registration_number %in% was_not_approved_2021$voter_registration_number) %>%
+  lower_df() 
+
+grouper(was_not_approved_2021, "status_reason", "number")
+
+```
+
+
+
+```{r}
+
+late_submissions_2021 <- was_not_approved_2021 %>% 
+  filter(str_detect(status_reason, "after deadline")) %>%
+  bind_rows(was_not_approved_2021 %>% filter(str_detect(status_reason, "too late"))) %>%
+  filter(status_reason != "addr chg after deadline")
+
+grouper(late_submissions_2021, "application_days_from") %>%
+  arrange(application_days_from)
+
+#20 were made on or after election day
+#17 were made the day before
+
+```
+
+```{r}
+
+mean(late_submissions_2021$application_days_from, rm.na = TRUE)
+  
+
+```
+
+```{r}
+
+median(late_submissions_2021$application_days_from)
+
+```
+
+```{R}
+
+19.10739+27.75453+19.66527
+
+```
+
+#HOW MANY PEOPLE IN 2020 WOULD HAVE HAD A BALLOT REJECTED UNDER NEW LAW?
+
+```{r}
+
+would_have_been_rejected_2020 <- absentee_2020 %>%
+  filter(application_days_from <= 11) %>%
+  filter(ballot_style != "IN PERSON") %>%
+  filter(application_days_from >= 1)
+
+grouper(would_have_been_rejected_2020, "application_days_from") %>%
+  arrange(desc(application_days_from)) %>%
+    adorn_totals("row")
+
+```
+
+
+
+```{r}
+
+grouped_would_have_been_rejected_2020 <- would_have_been_rejected_2020 %>%
+  group_by(voter_registration_number) %>%
+    summarise(applications = n(),
+            #if any application resulted in a 1, will say 1
+            application_response = max(binary_application_status),
+            ballot_returned = max(binary_ballot_return),
+            ballot_status = max(binary_ballot_status),
+            days_application= round(mean(application_days_from)), 
+            days_issued = mean(ballot_issued_days_from),
+            days_returned = mean(ballot_return_days_from))
+
+grouper(grouped_would_have_been_rejected_2020, "application_response") 
+
+```
+
+```{r}
+
+accepted_grouped_would_have_been_rejected_2020 <- grouped_would_have_been_rejected_2020 %>%
+  #filter(application_response == 1) %>%
+  left_join(certified_mailed_voters_2020 %>%
+            select(voter_registration_number, voter_outcome))
+
+grouper(accepted_grouped_would_have_been_rejected_2020, "voter_outcome")
+
+```
+```{r}
+
+grouper(accepted_grouped_would_have_been_rejected_2020, "voter_outcome")
+
+```
+
+```{r}
+
+within_11_days_2020_grouped_by_app_day <- accepted_grouped_would_have_been_rejected_2020 %>%
+  mutate(voter_outcome = case_when(
+    str_detect(voter_outcome, "voted in person") == TRUE ~ "voted in person",
+    TRUE ~ voter_outcome
+  )) %>%
+  group_by(days_application, voter_outcome) %>%
+  summarise(ballot_applications = n()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = days_application, values_from = ballot_applications) %>%
+  clean_names()
+
+within_11_days_2020_grouped_by_app_day[is.na(within_11_days_2020_grouped_by_app_day)] <- 0
+
+percent_within_11_days_2020_grouped_by_app_day <- as.data.frame(within_11_days_2020_grouped_by_app_day %>%
+  select(-x1, -x2, -x3) %>%
+  adorn_totals("col")) %>%
+  mutate(x4 = (x4/sum(x4))*100,
+         x5 = (x5/sum(x5))*100,
+         x6 = (x6/sum(x6))*100,
+         x7 = (x7/sum(x7))*100,
+         x8 = (x8/sum(x8))*100,
+         x9 = (x9/sum(x9))*100,
+         x10 = (x10/sum(x10))*100,
+         x11 = (x11/sum(x11))*100)
+#write_csv(within_11_days_2020_grouped_by_app_day, "within_11_days_2020_grouped_by_app_day.csv")
+
+percent_within_11_days_2020_grouped_by_app_day
+
+```
+
+```{r}
+
+rejected_ballot_accepted_grouped_would_have_been_rejected_2020 <- accepted_grouped_would_have_been_rejected_2020 %>%
+  filter(ballot_status == 0) %>%
+  mutate(returned_on_time = case_when(
+    days_returned >= 0 ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+grouper(rejected_ballot_accepted_grouped_would_have_been_rejected_2020, "returned_on_time")
+
+```
+
+```{r}
+
+returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020 <- rejected_ballot_accepted_grouped_would_have_been_rejected_2020 %>%
+  filter(returned_on_time == TRUE)
+
+returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020 <- would_have_been_rejected_2020 %>%
+  filter(voter_registration_number %in% returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020$voter_registration_number)
+
+grouper(returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020, "ballot_status")
+
+# the vast majority of the ballots that were returned on-time were cancelled
+```
+
+```{R}
+
+rejected_returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020 <- returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020 %>%
+  filter(ballot_status == "R")
+
+grouper(rejected_returned_on_time_rejected_ballot_accepted_grouped_would_have_been_rejected_2020, "status_reason")
+```
+
+#WERE THERE ANY PEOPLE WHO WOULD HAVE BEEN REJECTED IN 2020 THAT GOT REJECTED IN 2021?
+
+```{R}
+
+
+within_11_days_both_times <- was_not_approved_2021 %>%
+  inner_join(would_have_been_rejected_2020, by = "voter_registration_number")
+
+within_11_days_both_times
+#write_csv(within_11_days_both_times, "within_11_days_both_times.csv")
+#6 people were
+```
+```{r}
+
+did_not_vote_within_11_days_2020 <- certified_mailed_voters_2021 %>%
+  inner_join(would_have_been_rejected_2020, by = "voter_registration_number") %>%
+  filter(!str_detect(voter_outcome, "voted"))
+
+did_not_vote_within_11_days_2020
+
+#write_csv(did_not_vote_within_11_days_2020, "did_not_vote_within_11_days_2020.csv")
+
+```
+
+
+#HOW MANY 2021 BALLOTS WERE REJECTED BY SIGNATURE?
+
+```{r}
+
+grouper(absentee_2021, "status_reason") %>%
+  lower_df() %>%
+  filter(str_detect(status_reason, "sig")) %>%
+  adorn_totals("row")
+
+```
+
+```{r}
+
+missing_signatures_2021 <- mailed_2021 %>%
+  mutate(status_reason = tolower(status_reason)) %>%
+  filter(str_detect(status_reason, "sig"))
+
+grouper(missing_signatures_2021, "county")
+
+#90% of the missing signature rejections in 2021 came from Fulton, Cobb or Dekalb
+```
+
+```{r}
+
+signature_errors_2021 <- grouper(missing_signatures_2021, "status_reason")
+
+#82 were missing signature
+#1 was a signature mismatch
+#58 were election signature
+```
+
+# WHAT WERE VOTER ID REJECTIONS?
+
+```{r}
+
+rejected_mail_ballots_2021 <- mailed_2021 %>%
+  filter(ballot_status %notin% c("A", "C")) %>%
+  filter(!is.na(ballot_status)) %>%
+  mutate(status_reason = tolower(status_reason)) 
+
+
+id_error_rejected_mail_ballots_2021 <- rejected_mail_ballots_2021 %>%
+  filter(status_reason %notin% signature_errors_2021$status_reason) %>%
+  filter(str_detect(status_reason, "id")) %>%
+  filter(!str_detect(status_reason, "invalid"))
+
+missing_id_2021 <- as.data.frame(grouper(id_error_rejected_mail_ballots_2021, "status_reason", "ballots") %>%
+  adorn_totals('row'))
+
+missing_id_2021
+
+```
+
+#OTHER REJECTIONS
+
+```{r}
+
+other_rejected_mail_ballots_2021 <- mailed_2021 %>%
+  filter(ballot_status %notin% c("A", "C")) %>%
+  filter(!is.na(ballot_status)) %>%
+  filter(status_reason %notin% signature_errors_2021$status_reason) %>%
+  filter(!str_detect(status_reason, "id"))
+
+rejections_2021 <- grouper(other_rejected_mail_ballots_2021, "status_reason", "ballots") %>%
+  bind_rows(missing_id_2021) %>%
+  filter(status_reason != "Total") 
+
+
+as.data.frame(rejections_2021 %>%
+  mutate(percent = (ballots/sum(rejections_2021$ballots)*100)) %>%
+  adorn_totals("row")) %>%
+  arrange(desc(ballots))
+
+
+
+```
+
+WHAT REASONS WERE APPLICATIONS REJECTED IN 2021?
+
+```{r}
+
+rejected_mail_applications_2021 <- mailed_2021 %>%
+  filter(application_status != "A") %>%
+  mutate(status_reason = tolower(status_reason)) 
+
+grouped_rejected_mail_applications_2021 <- grouper(rejected_mail_applications_2021, "status_reason", "ballots") 
+  
+late_rejections <- grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, "after deadline")) %>%
+  bind_rows(grouped_rejected_mail_applications_2021 %>% filter(str_detect(status_reason, "too late"))) %>%
+  filter(status_reason != "addr chg after deadline") %>%
+  adorn_totals("row")
+
+late_rejections
+```
+
+```{r}
+
+(742/nrow(rejected_mail_applications_2021)*100)
+
+```
+
+```{r}
+
+other_grouped_rejected_mail_applications_2021 <- grouped_rejected_mail_applications_2021 %>%
+  filter(!str_detect(status_reason, "after deadline")) %>%
+  filter(!str_detect(status_reason, "too late"))
+
+
+id_rejections <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, c("\\sid\\s"))) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, c("id\\s"))))%>%
+    bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, c("\\sid"))))%>%
+  distinct(status_reason, .keep_all = TRUE) %>%
+  filter(!str_detect(status_reason, "invalid")) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(status_reason == "invalid id")) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(status_reason == "invalid dl/ga id#")) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(status_reason == "missing required voter identification")) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, "dl#"))) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, "dl #"))) %>%
+  adorn_totals("row")
+
+
+
+id_rejections
+ 
+```
+
+```{r}
+
+not_id_other_grouped_rejected_mail_applications_2021 <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(status_reason %notin% id_rejections$status_reason)
+
+sig_rejections <- not_id_other_grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, c("sig"))) %>%
+  adorn_totals("row")
+
+sig_rejections
+
+```
+
+```{r}
+
+not_sig_not_id_other_grouped_rejected_mail_applications_2021 <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(status_reason %notin% id_rejections$status_reason) %>%
+  filter(status_reason %notin% sig_rejections$status_reason)
+
+invalid_rejections <- not_sig_not_id_other_grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, "invalid")) %>%
+  adorn_totals("row")
+
+invalid_rejections
+
+```
+
+```{r}
+
+not_invalid_not_id_other_grouped_rejected_mail_applications_2021 <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(status_reason %notin% id_rejections$status_reason) %>%
+  filter(status_reason %notin% sig_rejections$status_reason) %>%
+  filter(status_reason %notin% invalid_rejections$status_reason)
+
+incomplete_rejections <- not_invalid_not_id_other_grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, "missing")) %>%
+  bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, "incomplete"))) %>%
+  adorn_totals("row")
+
+incomplete_rejections
+
+```
+
+```{r}
+
+not_incomplete_not_invalid_not_id_other_grouped_rejected_mail_applications_2021 <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(status_reason %notin% id_rejections$status_reason) %>%
+  filter(status_reason %notin% sig_rejections$status_reason) %>%
+  filter(status_reason %notin% invalid_rejections$status_reason) %>%
+  filter(status_reason %notin% incomplete_rejections$status_reason)
+
+early_rejections <- not_incomplete_not_invalid_not_id_other_grouped_rejected_mail_applications_2021 %>%
+  filter(str_detect(status_reason, "early")) %>%
+   bind_rows(other_grouped_rejected_mail_applications_2021 %>%
+            filter(str_detect(status_reason, "before"))) %>%
+  adorn_totals("row")
+
+early_rejections
+```
+
+```{r}
+
+not_early_not_incomplete_not_invalid_not_id_other_grouped_rejected_mail_applications_2021 <- other_grouped_rejected_mail_applications_2021 %>%
+  filter(status_reason %notin% id_rejections$status_reason) %>%
+  filter(status_reason %notin% sig_rejections$status_reason) %>%
+  filter(status_reason %notin% invalid_rejections$status_reason) %>%
+  filter(status_reason %notin% incomplete_rejections$status_reason) %>%
+  filter(status_reason %notin% early_rejections$status_reason)
+
+not_early_not_incomplete_not_invalid_not_id_other_grouped_rejected_mail_applications_2021
+```
+
+
+```{r}
+cleaned_rejected_mail_applications_2021 <- rejected_mail_applications_2021 %>%
+  mutate(rejection_reason = case_when(
+    status_reason %in% late_rejections$status_reason ~ "received late",
+    status_reason %in% id_rejections$status_reason ~ "id mismatch or missing",
+    status_reason %in% sig_rejections$status_reason ~ "missing, electronic or mismatch signature",
+    status_reason %in% invalid_rejections$status_reason ~ "invalid application",
+    status_reason %in% incomplete_rejections$status_reason ~ "incomplete application",
+    status_reason %in% early_rejections$status_reason ~ "received early",
+    str_detect(status_reason, "uneligible") == TRUE ~ "ineligible application",
+    str_detect(status_reason, "ineligible") == TRUE ~ "ineligible application",
+    str_detect(status_reason, "not in") == TRUE ~ "not in muni limits",
+    TRUE ~ status_reason
+  ))
+
+grouper(cleaned_rejected_mail_applications_2021, "rejection_reason", "applications") %>%
+  adorn_totals("row")
+
+```
+
+# FACT CHECK
+
+## "During municipal elections in November, Georgia voters were 45 times more likely to have their mail ballot applications rejected—and ultimately not vote as a result—than in 2020."
+
+```{r}
+
+not_approved_did_not_vote <- final_agg_vote %>%
+  filter(voter_outcome == "was not approved, did not vote") %>%
+  select(voters_2021, voters_2020, percent_2021, percent_2020, difference_2020)
+
+not_approved_did_not_vote$percent_2021/not_approved_did_not_vote$percent_2020
+
+# correct
+
+```
+
+## "If that same rejection rate were extrapolated to the 2020 race, more than 38,000 votes would not have been cast in a presidential contest decided by just over 11,000 votes."
+
+```{r}
+
+not_approved_did_not_vote$difference_2020*not_approved_did_not_vote$voters_2020
+
+#correct
+
+```
+
+```{r}
+
+final_agg_vote
+
+```
+
+## "In November 2021, Georgians who successfully obtained mail ballots were also twice as likely to have those ballots rejected once they were submitted compared to the previous year."
+
+```{r}
+ballot_returned_vote_missing <- final_agg_vote %>%
+  filter(voter_outcome == "ballot returned, vote missing") %>%
+  select(voters_2021, voters_2020, percent_2021, percent_2020, difference_2020)
+
+ballot_returned_vote_missing$percent_2021/ballot_returned_vote_missing$percent_2020
+
+#correct
+
+```
+
+## "If that were the case in 2020, about 31,000 fewer votes would have been cast in the presidential election."
+
+
+```{r}
+
+ballot_returned_vote_missing$difference_2020*ballot_returned_vote_missing$voters_2020
+
+#correct 
+
+```
+
+## "More than half of mail ballot applications were rejected because they arrived after the state’s new deadline to request them."
+
+```{r}
+
+as.data.frame(grouper(cleaned_rejected_mail_applications_2021, "rejection_reason", "ballots") %>%
+  adorn_totals("row"))
+
+#correct 
+
+```
+
+## "In 2020, more than 21,000 voters requested and cast ballots inside of 11 days before the election."
+
+
+```{r}
+
+grouper(accepted_grouped_would_have_been_rejected_2020, "ballot_status")
+
+#correct
+
+```
+
+## "Of 34,810 voters who requested a mail ballot in 2021, 1,038 were ultimately rejected."
+
+```{r}
+
+application_responses_2021
+
+#correct
+
+```
+
+## "The number of people who did not vote because their applications were rejected (some tried more than once) comprised 2.19 percent of total mail voters, a relatively small figure.
+
+```{R}
+
+not_approved_did_not_vote$percent_2021
+
+#correct 
+
+```
+
+
+## "But that represented a dramatic 45 times increase over the 0.05 percent of Georgians in 2020 whose ballot applications were denied and did not vote—an example of how a seemingly minor change to voter access can lead to a big increase in disenfranchisement.
+
+```{r}
+
+not_approved_did_not_vote$percent_2020
+
+#correct
+
+```
+
+## "Nearly 60 percent of rejected mail ballots were tossed because they were received after the state’s Election Day deadline."
+
+```{r}
+
+ballot_rejections <- as.data.frame(rejections_2021 %>%
+  mutate(percent = (ballots/sum(rejections_2021$ballots)*100)) %>%
+  adorn_totals("row")) %>%
+  arrange(desc(ballots))
+
+ballot_rejections
+#correct
+```
+
+## "About one-sixth of mail ballots were tossed because voters submitted missing or incorrect identification information after the state imposed a new ID requirement for mail ballots."
+
+```{r}
+
+paste0(missing_id_2021$ballots[4]/ballot_rejections$ballots[1], ' ~ ', 1/6)
+
+#correct
+```
+
+"Even though mail voting was less crucial before the pandemic, Mother Jones also compared the 2021 election to municipal elections in 2019 and 2017. The rate voters' mail applications were rejected and did not vote was between 5 and 6 times higher for each."
+
+```{R}
+
+paste0( "2019: ", final_agg_vote$difference_2019[6], "; 2017: " ,final_agg_vote$difference_2017[6])
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
